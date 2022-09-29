@@ -1,0 +1,40 @@
+Demultiplexing :
+#!/bin/bash
+#SBATCH --partition normal
+#SBATCH --mem=100g
+#SBATCH -c 40
+#SBATCH --time=06:0:0
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate qiime2-2020.11
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path manifest.txt \
+  --output-path paired-end-demux.qza \
+  --input-format PairedEndFastqManifestPhred33V2 \
+qiime demux summarize \
+  --i-data ./paired-end-demux.qza \
+  --o-visualization ./paired-end-demux.qzv
+conda deactivate
+
+
+DADA2 table:
+#!/bin/bash
+#SBATCH --partition normal
+#SBATCH --mem=100g
+#SBATCH -c 40
+#SBATCH --time=10:0:0
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate qiime2-2020.11
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs ./paired-end-demux.qza \
+  --p-trim-left-f 2 \
+  --p-trunc-len-f 246 \
+  --p-trim-left-r 2 \
+  --p-trunc-len-r 245 \
+  --p-max-ee-f 2 \
+  --p-max-ee-r 2 \
+  --p-n-threads 0 \
+  --o-table ./dada2_table.qza \
+  --o-representative-sequences ./dada2_repseqs.qza \
+  --o-denoising-stats ./dada2_stats.qza
+conda deactivate
