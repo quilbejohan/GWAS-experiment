@@ -40,6 +40,21 @@ qiime dada2 denoise-paired \
 conda deactivate
 
 
+atgwas:
+#!/bin/bash
+#SBATCH --partition normal
+#SBATCH --mem 20g
+#SBATCH --account project_JQ
+#SBATCH -c 4
+#SBATCH -t 12:00:00
+
+python2.7 /faststorage/project/project_JQ/atgwas/src/gwa.py \
+	-a emmax \
+	-m  8 \
+	-r  data/Bacterialabundance_phenotype.csv \
+	-f  data/20220330_lotus_snps.csv \
+	--data_format='diploid_int'
+
 
 
 
