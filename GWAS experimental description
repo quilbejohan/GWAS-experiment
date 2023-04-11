@@ -1,1 +1,50 @@
-A collection of 165 Lotus accessions from japan have been inoculated with a Synthetic Community containing 107 bacterial strains. This experiment has been repeated 3 times at 2 weeks intervals and plants were grown for 4 weeks. The rhizosphere has been harvested for each accession and an amplicon sequencing strategy targeting the 16S v5-v7 region allows us to calculate the relative abundances of the strains. These data have been used to perform GWAS analysis on different phenotypical values comprising individual strains abundances, family level abundances and overall microbiome profiles thanks to different ordination methods.
+Plant culture
+Seeds are surface sterilized with 2% calcium chloride during 20min. After five washes with sterile water, the seeds are put at 4 °C overnight. 
+Seeds are put on plates and let for germination during 5 days at 21 °C. 
+The seedlings are transferred to plastic pots (9/pot) containing an autoclaved substrate composed of vermiculite, sand and small leca. 
+After inoculation, the pots are placed into autoclaved big plastic boxes and a plastic cover is used to keep high humidity during the firsts two days. 
+The plastic boxes are placed into growth chamber with the following conditions : 16/8 for the day-night cycle, 75% Rh and 22°C/18°C in temperature (Day-night). The plants are watered with SLA media and after 21 days of growth, the plants are harvested.
+
+Bacterial culture
+Bacterial strains are grown in liquid culture depending on their growing time and preferred media (TSB or YMB) during 2 or 6 days at 24°C. 
+When the culture reach a sufficient concentration, they are centrifuged and washed 2 times with liquid SLA media. 
+The OD600 of each individual strains (107) is measured and all strains are pooled together to reach an equal quantity. The measured OD600 of the final pool was diluted to 0.02. 
+For inoculation, 5mL of Synthetic Community liquid culture is spread from the top in each pots.
+
+Harvesting for microbiome profiling
+For this experiment, 165 Lotus japonicus accessions have been inoculated with a Synthetic Community containing 107 bacterial strains. 
+The controls correspond to toothpick inoculated and non-inoculated as well as the initial input SC inoculant.
+For rhizosphere sampling, the roots are placed into falcon containing 30mL of sterile water and strongly washed to detach the soil particles from the roots. The tubes are centrifuged and the majority of the water is removed to concentrate the sample. 
+The tube is vortexed and 300uL of solution is transferred into 2mL tubes for DNA extraction. 
+
+PCR amplification and sequencing
+Extractions were performed from 300uL of concentrated rhizosphere solution coming from strong washes of the roots. The roots of 9 plants have been pooled for each accessions and correspond to one biological replicate. We repeated the whole experiment 3 times, so there are 3 biological replicates for each accession genotype. 
+The DNA soil extraction kit (FastDNA™ Spin Kit for Soil, MP Biomedicals) from was used following the manufacturer’s instructions. The library preparation started with the amplification of the V5-V7 region of the 16S rRNA with barcoded PCR primers 799F and 1193R with 25 cycles. Then a second round of PCR has been performed to add the flanking regions (Adapters, Indexes and Reads). Finally, paired-end sequencing 2x250 was performed using a NovaSeq 6000 system (20G raw data) by Novogene.
+
+
+Processing of the raw reads
+The sequencing has been performed with the NovaSeq6000 2x250bp system (20G raw data per sample). The raw reads are treated with QIIME2 to produce the count table (dada2). The assignment of the ASVs to the isolate names has been performed using VSEARCH on a custom database.
+R and the PhyloSeq package have been used to produce the relative abundance tables. The individual abundances for the top20 strains in the 3 replicates plus the average of these 3 have been used to create phenotype files.
+The data has also been transformed with MDS and NMDS methods as well as with the package mixOmics. This phenotypes files are subsequently used for the GWAS workflow.
+
+
+Genome-Wide Association Study
+Previous genomic analyses have been performed on the Lotus japonicus accessions panel (Shah et al, 2020). SNP file produced in this study has been re-used for this analysis. 
+GWA scans were carried out using a python implementation of EMMA (https://app.assembla.com/spaces/atgwas/git/source) with a minor allele count cutoff of 8.
+For selected traits, the method was applied to capture variance explained by a subset of associated SNPs GWA p-values ≤ 5e^−5.
+The output file containing the SNP position and the p-values associated with phenotypes are processed in R to obtain Manhattan plots and bedfiles. 
+The GFF file of Lotus japonicus Gifu v1.3 is used in combination with the bedfiles to identify exonic SNPs.
+After processing many different phenotype files based on transformation or individual relative abundances, we selected the most significant SNPs and the ones that are overlapping between the different phenotype values.
+
+
+
+
+
+
+
+
+
+
+
+
+
