@@ -1,0 +1,95 @@
+library(ggplot2)
+library(ggmap)
+library(maps)
+library(mapdata)
+library(viridis)
+library(dplyr)
+
+
+#Prepare data
+temp_data <- read.csv("LotusSNPs.csv", header = TRUE, row.names = 1, sep = ";", dec = ".")
+japan_map <- map_data("world", region = "japan")
+temp_data <- temp_data[!is.na(temp_data$lat), ]
+temp_data$combination <- interaction(as.character(temp_data$SNP_78606912), as.character(temp_data$SNP_78609830))
+temp_data$Accessions = rownames(temp_data)
+
+#set aes
+alpha = 0.8
+font.size.axis = 20
+font.size.legend = 15
+point.size = 5
+theme <- theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text=element_text(size=font.size.axis), legend.text=element_text(size=font.size.legend), axis.title=element_text(size=font.size.axis,face="bold"), legend.title=element_text(size=font.size.legend, face="bold"), legend.background = element_rect(fill="transparent"))
+
+#Point color
+custom_colors <- c("firebrick3", "royalblue2", "chartreuse2","grey55")  
+
+
+#Haplotypes map
+Jap_haplotype <- ggplot() +
+  geom_polygon(data = japan_map, aes(x = long, y = lat, group = group), fill = "grey", color = "grey") +
+  scale_color_manual(values = custom_colors) +
+  coord_fixed(1.3) +
+  geom_point(data = temp_data, aes(x = lon, y = lat, color = factor(State)), size=3.5, alpha=0.8) + theme + labs(x = "Longitude", y = "Latitude", color = "Haplotype")
+
+Jap_haplotype
+
+#ggsave("Japan_map_haplotypes.png", Jap_haplotype, width = 8, height = 8, dpi = 300)
+
+
+
+#Color palette for accessions
+
+#color_palette <- magma(n = 150)
+#color_palette = inferno(n=150)
+#color_palette <- plasma(n = 150)
+color_palette = viridis(n=150)
+
+
+#Accessions map
+Jap_accessions <- ggplot() +
+  geom_polygon(data = japan_map, aes(x = long, y = lat, group = group), fill = "grey", color = "grey")+
+  coord_fixed(1.3) +
+  geom_point(data = temp_data, aes(x = lon, y = lat, color = factor(Accessions)), size=3.5, alpha=0.8) + scale_color_manual(values = color_palette) + labs(x = "Longitude", y = "Latitude", color = "Haplotype") + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text=element_text(size=font.size.axis), axis.title=element_text(size=font.size.axis,face="bold"), legend.position = "none")
+
+Jap_accessions
+
+#ggsave("Japan_map_Accessions.png", Jap_accessions, width = 8, height = 8, dpi = 300)
+
+
+
+
+
+
+#Try to zoom in Chiba prefecture ------
+
+#set lat/lon for chiba
+lat <- c(34.8, 35.8)  
+lon <- c(139.5, 140.5) 
+
+# zoom in chiba
+chiba=map("japan", fill = TRUE, xlim = lon, ylim = lat, col = "grey", bg = "white")
+
+
+# Filteraccessions in CHiba
+lat_range <- c(34.8, 35.8)
+lon_range <- c(139.5, 140.5)
+
+filtered_temp_data <- temp_data %>%
+  filter(lat >= lat_range[1] & lat <= lat_range[2],
+         lon >= lon_range[1] & lon <= lon_range[2])
+
+
+custom_colors <- c("firebrick3", "royalblue2", "chartreuse2","grey55")  
+#Haplotypes map
+Jap_haplotype <- ggplot() +
+  geom_polygon(data = chiba, aes(x = long, y = lat, group = group), fill = "white", color = "grey30") +
+  scale_color_manual(values = custom_colors) +
+  coord_fixed(1.3) +
+  geom_point(data = filtered_temp_data, aes(x = lon, y = lat, color = factor(State)), size=3.5, alpha=0.8) + theme + labs(x = "Longitude", y = "Latitude", color = "Haplotype")
+
+Jap_haplotype
+
+
+
+#ggsave("Chiba_map_Haplotypes.png", Jap_haplotype, width = 8, height = 8, dpi = 300)
+
