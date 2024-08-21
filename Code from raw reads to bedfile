@@ -40,6 +40,37 @@ qiime dada2 denoise-paired \
 conda deactivate
 
 
+
+VSEARCH: 
+#!/bin/bash
+#SBATCH --partition normal
+#SBATCH --mem=30g
+#SBATCH -c 24
+#SBATCH --time=01:0:0
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate qiime2-2020.11
+
+qiime tools import \
+--type 'FeatureData[Sequence]' \
+--input-format DNAFASTAFormat \
+--input-path dna-seq-MiniSyncom.fa \
+--output-path dna-seq-MiniSynCom.qza
+
+qiime vsearch cluster-features-open-reference \
+  --i-table dada2_table.qza \
+  --i-sequences dada2_repseqs.qza \
+  --i-reference-sequences dna-seq-MiniSynCom.qza \
+  --p-perc-identity 0.99 \
+  --o-clustered-table table_99.qza \
+  --o-clustered-sequences repseq_99.qza \
+  --o-new-reference-sequences new-ref-seqs_99.qza
+
+conda deactivate
+
+
+
+
 atgwas:
 #!/bin/bash
 #SBATCH --partition normal
@@ -58,49 +89,5 @@ python2.7 /faststorage/project/project_JQ/atgwas/src/gwa.py \
 
 
 
-Mannhattan plot and table :
-ow2 = read.delim('LjRoot296rep3_output.csv',
-                 sep = ',',
-                 header = TRUE)
-dfForMP = function(df) {
-  df = df[!df$chromosomes %in% c(0, 7, 8), ]
-  df = df[df$macs > 8, ]
-  df = df[, c(1, 2, 3)]
-  df$SNP = paste(df$chromosomes, df$positions, sep = '_')
-  colnames(df)[c(1, 2, 3)] = c('CHR', 'BP', 'P')
-  df = df[, c(4, 1, 2, 3)]
-  return(df)
-}
-ow2 = dfForMP(ow2)
-qq(ow2$P)
-ow2$Padj = p.adjust(p = ow2$P, method = 'BH')
-sig2 = ow2[ow2$P <= 1e-5, ]
-sig2
-png('C:/LjRoot296rep3.png', height = 4500, width = 8000, res = 1000)
-MP(ow2[, 1:4],
-   highlight = sig2$SNP,
-   col = c('#332288', '#0066CC'),
-   genomewideline = FALSE)
-dev.off()
-
-
-write.table(sig2, sep = '\t', file = 'sig_LjRoot296rep3.txt', row.names = FALSE, col.names = T, quote = FALSE)
-
-
-From table to bedfile : 
-bed = read.delim("sig_LjRoot296rep3.txt", sep = '\t', header = TRUE)
-bed = bed[, c(2, 3, 4)]
-bed$other_pos = bed$BP - 1
-bed = bed[, c(1, 4, 2, 3)]
-for(i in 1:length(bed$CHR)) {
-  if(bed$CHR[i] == 1) {bed$CHR[i] = 'LjG1.1_chr1'}
-  if(bed$CHR[i] == 2) {bed$CHR[i] = 'LjG1.1_chr2'}
-  if(bed$CHR[i] == 3) {bed$CHR[i] = 'LjG1.1_chr3'}
-  if(bed$CHR[i] == 4) {bed$CHR[i] = 'LjG1.1_chr4'}
-  if(bed$CHR[i] == 5) {bed$CHR[i] = 'LjG1.1_chr5'}
-  if(bed$CHR[i] == 6) {bed$CHR[i] = 'LjG1.1_chr6'}
-}
-write.table(bed, file="bedsig_LjRoot296rep3.txt",quote=FALSE,
-            row.names=FALSE,col.names=FALSE,sep="\t")
 
 
