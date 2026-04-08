@@ -1512,6 +1512,123 @@ Jap_haplotype
 
 
 
+# LD DECAY ANALYSIS
+
+
+
+
+ld_table_window_chr <- function(df_chr, index_pos, sample_cols, window_bp = 20000) {
+  
+  df_win <- df_chr %>%
+    filter(POS >= (index_pos - window_bp),
+           POS <= (index_pos + window_bp))
+  
+  if (nrow(df_win) < 2) return(NULL)
+  
+  focal_row <- df_win %>% filter(POS == index_pos) %>% slice(1)
+  if (nrow(focal_row) == 0) return(NULL)
+  
+  g_focal <- as.numeric(focal_row[, sample_cols] %>% unlist(use.names = FALSE))
+  if (stats::sd(g_focal, na.rm = TRUE) == 0 || all(is.na(g_focal))) return(NULL)
+  
+  calc_r2 <- function(g) {
+    g <- as.numeric(g)
+    ok <- is.finite(g) & is.finite(g_focal)
+    if (sum(ok) < 5) return(NA_real_)
+    if (stats::sd(g[ok]) == 0) return(NA_real_)
+    r <- suppressWarnings(stats::cor(g_focal[ok], g[ok]))
+    as.numeric(r^2)
+  }
+  
+  r2_vals <- apply(df_win[, sample_cols, drop = FALSE], 1, calc_r2)
+  
+  out_df <- df_win %>%
+    transmute(
+      POS = POS,
+      abs_bp = abs(POS - index_pos),
+      r2 = r2_vals
+    ) %>%
+    filter(is.finite(r2)) %>%
+    filter(abs_bp > 0)  # remove self (R2=1)
+  
+  if (nrow(out_df) < 10) return(NULL)
+  out_df
+}
+
+# --- AUC from LOESS fit of r2 ~ abs(distance) ---
+auc_from_loess <- function(ld_df, window_bp = 20000, span = 0.7, grid_n = 200) {
+  if (is.null(ld_df) || nrow(ld_df) < 10) return(NA_real_)
+  
+  df <- ld_df %>%
+    mutate(abs_kb = abs_bp / 1000) %>%
+    filter(is.finite(abs_kb), is.finite(r2)) %>%
+    arrange(abs_kb)
+  
+  if (nrow(df) < 10) return(NA_real_)
+  
+  fit <- try(stats::loess(
+    r2 ~ abs_kb, data = df, span = span, degree = 1,
+    control = loess.control(surface = "direct")
+  ), silent = TRUE)
+  if (inherits(fit, "try-error")) return(NA_real_)
+  
+  xgrid <- seq(0, window_bp / 1000, length.out = grid_n)
+  yhat <- predict(fit, newdata = data.frame(abs_kb = xgrid))
+  yhat <- pmax(pmin(yhat, 1), 0)
+  
+  auc_kb <- sum(diff(xgrid) * (head(yhat, -1) + tail(yhat, -1)) / 2)
+  auc_kb / (window_bp / 1000)  # normalized AUC
+}
+
+
+
+### auc computing
+window_bp <- 20000
+span <- 0.7
+grid_n <- 200
+
+# split SNP_matrix once by chromosome for speed
+SNP_by_chr <- split(SNP_matrix, SNP_matrix$CHR)
+
+# focal SNP list
+focal_ids <- SNP_interest_new %>%
+  transmute(focal_SNP = as.character(focal_SNP)) %>%
+  distinct() %>%
+  pull(focal_SNP)
+
+# compute AUC table
+AUC_tbl <- lapply(seq_along(focal_ids), function(i) {
+  fid <- focal_ids[i]
+  
+  # optional progress
+  if (i %% 200 == 0) message(i, "/", length(focal_ids))
+  
+  parts <- strsplit(fid, "_")[[1]]
+  chr <- as.integer(parts[1])
+  pos <- as.integer(parts[2])
+  
+  df_chr <- SNP_by_chr[[as.character(chr)]]
+  if (is.null(df_chr)) return(tibble(focal_SNP = fid, AUC_new = NA_real_))
+  
+  ld_df <- ld_table_window_chr(df_chr, index_pos = pos, sample_cols = sample_cols, window_bp = window_bp)
+  aucv <- auc_from_loess(ld_df, window_bp = window_bp, span = span, grid_n = grid_n)
+  
+  tibble(focal_SNP = fid, AUC_new = aucv)
+}) %>% bind_rows()
+
+# join into your table
+SNP_interest_new2 <- SNP_interest_new %>%
+  mutate(focal_SNP = as.character(focal_SNP)) %>%
+  left_join(AUC_tbl, by = "focal_SNP")
+
+
+summary(SNP_interest_new2$AUC_new)
+sum(is.na(SNP_interest_new2$AUC_new))
+
+
+
+
+
 
 
 
