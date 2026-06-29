@@ -1,0 +1,120 @@
+# ============================================================
+# 03. Japan maps of accessions and ROOMIE1 haplotypes
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(maps)
+})
+
+# -----------------------------
+# Input data
+# -----------------------------
+accession_data <- read.csv(
+  "LotusSNP_accessions_location.csv",
+  header = TRUE,
+  row.names = 1,
+  sep = ",",
+  dec = ".",
+  check.names = FALSE
+)
+
+japan_map <- map_data("world", region = "japan")
+
+# keep only samples with coordinates
+accession_data <- accession_data[!is.na(accession_data$lat), , drop = FALSE]
+accession_data$Accession <- rownames(accession_data)
+
+# optional combined haplotype label
+accession_data$ROOMIE1_combination <- interaction(
+  as.character(accession_data$SNP_78606912),
+  as.character(accession_data$SNP_78609830)
+)
+
+# -----------------------------
+# Plot settings
+# -----------------------------
+point_alpha <- 0.8
+base_point_size <- 4
+legend_text_size <- 22
+legend_title_size <- 24
+axis_text_size <- 14
+axis_title_size <- 18
+
+map_theme <- theme(
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  panel.background = element_blank(),
+  plot.background = element_blank(),
+  axis.text = element_text(size = axis_text_size),
+  axis.title = element_text(size = axis_title_size, face = "bold"),
+  legend.text = element_text(size = legend_text_size),
+  legend.title = element_text(size = legend_title_size, face = "bold"),
+  legend.background = element_rect(fill = "transparent")
+)
+
+base_japan_map <- ggplot() +
+  geom_polygon(
+    data = japan_map,
+    aes(x = long, y = lat, group = group),
+    fill = "grey",
+    color = "black"
+  ) +
+  coord_fixed(1.3) +
+  labs(x = "Longitude", y = "Latitude") +
+  map_theme
+
+# -----------------------------
+# 1. All accessions (monochrome)
+# -----------------------------
+plot_accessions_monochrome <- base_japan_map +
+  geom_point(
+    data = accession_data,
+    aes(x = lon, y = lat),
+    color = "royalblue3",
+    size = base_point_size,
+    alpha = point_alpha
+  ) +
+  theme(legend.position = "none")
+
+plot_accessions_monochrome
+# ggsave("Japan_map_Accessions_monochrome.png",
+#        plot_accessions_monochrome, width = 8, height = 8, dpi = 500)
+
+# -----------------------------
+# 2. Accessions by North/South population
+# -----------------------------
+population_colors <- c("royalblue3", "firebrick3")
+
+plot_accessions_population <- base_japan_map +
+  geom_point(
+    data = accession_data,
+    aes(x = lon, y = lat, color = factor(Population)),
+    size = base_point_size,
+    alpha = point_alpha
+  ) +
+  scale_color_manual(values = population_colors) +
+  labs(color = "Population")
+
+plot_accessions_population
+# ggsave("Japan_map_population_northsouth.png",
+#        plot_accessions_population, width = 8, height = 8, dpi = 500)
+
+# -----------------------------
+# 3. Accessions by ROOMIE1 state
+# -----------------------------
+roomie1_colors <- c("firebrick3", "royalblue2", "chartreuse2", "grey55")
+
+plot_accessions_roomie1 <- base_japan_map +
+  geom_point(
+    data = accession_data,
+    aes(x = lon, y = lat, color = factor(State_ROOMIE1)),
+    size = 3.5,
+    alpha = point_alpha
+  ) +
+  scale_color_manual(values = roomie1_colors) +
+  labs(color = "ROOMIE1")
+
+plot_accessions_roomie1
+# ggsave("Japan_map_ROOMIE1_haplotypes.png",
+#        plot_accessions_roomie1, width = 8, height = 8, dpi = 400)
