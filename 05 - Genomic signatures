@@ -1,0 +1,406 @@
+# ============================================================
+# 05. Plot population-genomic signatures
+# ============================================================
+# Purpose:
+#   Read SNP_categories_all_metrics.csv and generate the
+#   population-genomic visualizations used in the manuscript:
+#     - MAF vs FST scatter plots
+#     - AUC_LOESS- and FST_founder-colored scatter plots
+#     - SNP-by-accession heatmaps by SNP category
+#
+# Main inputs:
+#   - SNP_categories_all_metrics.csv
+#   - Lj_accessions_SNPs.csv
+#   - LotusSNP_accessions_location.csv
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(tibble)
+  library(viridis)
+  library(scales)
+})
+
+# -----------------------------
+# Input files
+# -----------------------------
+snp_metrics_file <- "SNP_categories_all_metrics.csv"
+snp_matrix_file <- "Lj_accessions_SNPs.csv"
+accession_metadata_file <- "LotusSNP_accessions_location.csv"
+
+# -----------------------------
+# Load data
+# -----------------------------
+SNP_categories <- read.csv(snp_metrics_file, sep = ",", check.names = FALSE)
+
+SNP_matrix <- read.csv(snp_matrix_file, sep = ";", check.names = FALSE) %>%
+  mutate(snp_id = paste(CHR, POS, sep = "_"))
+
+accession_meta <- read.csv(accession_metadata_file, sep = ",", check.names = FALSE)
+
+if ("X" %in% names(accession_meta)) {
+  accession_meta <- accession_meta %>% rename(accession = X)
+}
+
+accession_meta <- accession_meta %>%
+  mutate(
+    accession = as.character(accession),
+    lat = as.numeric(lat)
+  )
+
+sample_cols <- setdiff(names(SNP_matrix), c("CHR", "POS", "snp_id"))
+
+accession_meta <- accession_meta %>%
+  filter(accession %in% sample_cols)
+
+# ============================================================
+# 5A. Scatter plots
+# ============================================================
+
+plot_maf_fst_auc <- function(df, title) {
+  ggplot(df, aes(x = pmax(MAF, 0.05), y = Fst_pop, color = AUC_LOESS)) +
+    geom_point(alpha = 0.7, size = 3.5) +
+    geom_smooth(
+      method = "lm",
+      se = TRUE,
+      color = "black",
+      linewidth = 1.2
+    ) +
+    scale_color_viridis_c(
+      option = "plasma",
+      limits = c(0, 1),
+      breaks = c(0, 0.5, 1)
+    ) +
+    coord_cartesian(xlim = c(0.05, 0.5), ylim = c(0, 1)) +
+    theme_minimal(base_size = 13) +
+    labs(
+      title = title,
+      x = "MAF",
+      y = "FST (North vs South)",
+      color = "AUC"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+plot_maf_fst_founder <- function(df, title) {
+  ggplot(df, aes(x = pmax(MAF, 0.05), y = Fst_pop, color = pmax(Fst_founder, 0))) +
+    geom_point(alpha = 0.7, size = 3.5) +
+    geom_smooth(
+      method = "lm",
+      se = TRUE,
+      color = "black",
+      linewidth = 1.2
+    ) +
+    scale_color_gradient2(
+      low = "royalblue1",
+      mid = "grey70",
+      high = "firebrick1",
+      midpoint = 0.5,
+      limits = c(0, 1),
+      oob = scales::squish,
+      breaks = c(0, 0.5, 1),
+      name = "FST Tsushima/Mainland"
+    ) +
+    coord_cartesian(xlim = c(0.05, 0.5), ylim = c(0, 1)) +
+    theme_minimal(base_size = 13) +
+    labs(
+      title = title,
+      x = "MAF",
+      y = "FST (North vs South)"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+
+# keep rows with all required metrics
+SNP_categories_plot <- SNP_categories %>%
+  filter(!is.na(MAF), !is.na(Fst_pop), !is.na(AUC_LOESS))
+
+# split by SNP category
+df_by_label <- split(SNP_categories_plot, SNP_categories_plot$label)
+
+df_bg       <- df_by_label[["Background"]]
+df_nlr      <- df_by_label[["NLR"]]
+df_mic_main <- df_by_label[["Microbiome-Mainland"]]
+df_mic_tsu  <- df_by_label[["Microbiome-Tsushima"]]
+df_mic_perm <- df_by_label[["Microbiome_Permuted"]]
+df_abio     <- df_by_label[["Abiotic"]]
+df_abio_p   <- df_by_label[["Abiotic_Permuted"]]
+df_climate  <- df_by_label[["Climate"]]
+
+# Example plots
+plot_bg_auc       <- plot_maf_fst_auc(df_bg, "Background")
+plot_nlr_auc      <- plot_maf_fst_auc(df_nlr, "NLR")
+plot_mic_main_auc <- plot_maf_fst_auc(df_mic_main, "Microbiome-Mainland")
+plot_mic_tsu_auc  <- plot_maf_fst_auc(df_mic_tsu, "Microbiome-Tsushima")
+plot_abio_auc     <- plot_maf_fst_auc(df_abio, "Abiotic")
+plot_climate_auc  <- plot_maf_fst_auc(df_climate, "Climate")
+
+plot_bg_founder       <- plot_maf_fst_founder(df_bg, "Background")
+plot_nlr_founder      <- plot_maf_fst_founder(df_nlr, "NLR")
+plot_mic_main_founder <- plot_maf_fst_founder(df_mic_main, "Microbiome-Mainland")
+plot_mic_tsu_founder  <- plot_maf_fst_founder(df_mic_tsu, "Microbiome-Tsushima")
+plot_mic_perm_founder <- plot_maf_fst_founder(df_mic_perm, "Microbiome permuted")
+plot_abio_founder     <- plot_maf_fst_founder(df_abio, "Abiotic")
+plot_abio_p_founder   <- plot_maf_fst_founder(df_abio_p, "Abiotic permuted")
+plot_climate_founder  <- plot_maf_fst_founder(df_climate, "Climate")
+
+# ============================================================
+# 5B. Heatmaps of SNP categories by accession
+# ============================================================
+
+compute_panel_af <- function(SNP_matrix, snps, meta_cols = c("CHR", "POS", "snp_id")) {
+  sub <- SNP_matrix %>% filter(snp_id %in% snps)
+
+  if (nrow(sub) == 0) {
+    stop("No SNPs found in SNP_matrix for the requested snp_id set.")
+  }
+
+  geno_cols <- setdiff(names(sub), meta_cols)
+  G <- as.matrix(sub[, geno_cols, drop = FALSE])
+  storage.mode(G) <- "numeric"
+
+  ok <- is.finite(G)
+  n_nonmiss <- rowSums(ok)
+  AN <- 2 * n_nonmiss
+  AC_alt <- rowSums(G, na.rm = TRUE)
+  AF_alt <- AC_alt / AN
+
+  tibble(
+    snp_id = sub$snp_id,
+    AF_alt = AF_alt,
+    minor_is_alt = AF_alt <= 0.5,
+    AN = AN
+  )
+}
+
+add_minor_encoding <- function(geno_long, af_map, maf_table = NULL) {
+
+  out <- geno_long %>%
+    left_join(af_map %>% select(snp_id, minor_is_alt), by = "snp_id")
+
+  if (!is.null(maf_table)) {
+    out <- out %>%
+      left_join(maf_table %>% select(snp_id, MAF), by = "snp_id")
+  } else {
+    out <- out %>%
+      left_join(af_map %>% select(snp_id, AF_alt), by = "snp_id") %>%
+      mutate(MAF = pmin(AF_alt, 1 - AF_alt))
+  }
+
+  out %>%
+    mutate(
+      g = as.numeric(genotype),
+      minor_dosage = case_when(
+        !is.finite(g) | is.na(minor_is_alt) ~ NA_real_,
+        minor_is_alt ~ g,
+        TRUE ~ 2 - g
+      ),
+      minor_present = as.integer(minor_dosage > 0)
+    )
+}
+
+plot_heatmap_category <- function(SNP_categories,
+                                  label_name,
+                                  SNP_matrix,
+                                  accession_meta,
+                                  title = NULL,
+                                  value = c("binary", "dosage"),
+                                  order_accessions = TRUE,
+                                  order_snps_by = c("MAF", "none")) {
+
+  value <- match.arg(value)
+  order_snps_by <- match.arg(order_snps_by)
+
+  sample_cols <- setdiff(names(SNP_matrix), c("CHR", "POS", "snp_id"))
+
+  accession_meta <- accession_meta %>%
+    filter(accession %in% sample_cols)
+
+  snps <- SNP_categories %>%
+    filter(label == label_name) %>%
+    pull(snp_id) %>%
+    unique()
+
+  if (length(snps) == 0) {
+    stop("No SNPs found for label: ", label_name)
+  }
+
+  SNP_sub <- SNP_matrix %>%
+    filter(snp_id %in% snps) %>%
+    select(snp_id, all_of(sample_cols))
+
+  geno_long <- SNP_sub %>%
+    pivot_longer(cols = -snp_id, names_to = "accession", values_to = "genotype") %>%
+    left_join(accession_meta %>% select(accession, lat), by = "accession")
+
+  af_map <- compute_panel_af(SNP_matrix, snps)
+
+  maf_table <- SNP_categories %>%
+    filter(label == label_name) %>%
+    select(snp_id, MAF) %>%
+    distinct()
+
+  geno_long2 <- add_minor_encoding(geno_long, af_map, maf_table)
+
+  if (order_accessions) {
+    accession_order <- accession_meta %>%
+      distinct(accession, lat) %>%
+      arrange(lat, accession) %>%
+      pull(accession)
+
+    geno_long2 <- geno_long2 %>%
+      mutate(accession = factor(accession, levels = accession_order))
+  }
+
+  if (order_snps_by == "MAF") {
+    snp_order <- geno_long2 %>%
+      distinct(snp_id, MAF) %>%
+      arrange(MAF, snp_id) %>%
+      pull(snp_id)
+
+    geno_long2 <- geno_long2 %>%
+      mutate(snp_id = factor(snp_id, levels = snp_order))
+  }
+
+  if (value == "binary") {
+    p <- ggplot(geno_long2, aes(x = accession, y = snp_id, fill = factor(minor_present))) +
+      geom_tile() +
+      scale_fill_manual(
+        values = c("0" = "#440154FF", "1" = "#FDE725FF"),
+        breaks = c("0", "1"),
+        labels = c("Major allele", "Minor allele"),
+        name = "Allele state"
+      )
+  } else {
+    p <- ggplot(geno_long2, aes(x = accession, y = snp_id, fill = minor_dosage)) +
+      geom_tile() +
+      scale_fill_viridis_c(name = "Minor dosage", limits = c(0, 2))
+  }
+
+  if (is.null(title)) {
+    title <- label_name
+  }
+
+  p +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold")
+    ) +
+    labs(title = title)
+}
+
+# Optional combined microbiome category
+SNP_categories$label_all <- as.character(SNP_categories$label)
+SNP_categories$label_all[SNP_categories$label_all %in% c("Microbiome-Mainland", "Microbiome-Tsushima")] <- "Microbiome_all"
+
+SNP_categories_combined <- transform(SNP_categories, label = label_all)
+
+# Run heatmaps
+p_mic_all <- plot_heatmap_category(
+  SNP_categories_combined,
+  "Microbiome_all",
+  SNP_matrix,
+  accession_meta,
+  title = "Microbiome_all",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_bg <- plot_heatmap_category(
+  SNP_categories,
+  "Background",
+  SNP_matrix,
+  accession_meta,
+  title = "Background",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_nlr <- plot_heatmap_category(
+  SNP_categories,
+  "NLR",
+  SNP_matrix,
+  accession_meta,
+  title = "NLR",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_mic_main <- plot_heatmap_category(
+  SNP_categories,
+  "Microbiome-Mainland",
+  SNP_matrix,
+  accession_meta,
+  title = "Microbiome-Mainland",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_mic_tsu <- plot_heatmap_category(
+  SNP_categories,
+  "Microbiome-Tsushima",
+  SNP_matrix,
+  accession_meta,
+  title = "Microbiome-Tsushima",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_abio <- plot_heatmap_category(
+  SNP_categories,
+  "Abiotic",
+  SNP_matrix,
+  accession_meta,
+  title = "Abiotic",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_abio_perm <- plot_heatmap_category(
+  SNP_categories,
+  "Abiotic_Permuted",
+  SNP_matrix,
+  accession_meta,
+  title = "Abiotic permuted",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+p_mic_perm <- plot_heatmap_category(
+  SNP_categories,
+  "Microbiome_Permuted",
+  SNP_matrix,
+  accession_meta,
+  title = "Microbiome permuted",
+  value = "binary",
+  order_snps_by = "MAF"
+)
+
+# Optional: subsample background for more compact heatmap
+set.seed(42)
+
+bg_snps_500 <- SNP_categories %>%
+  filter(label == "Background") %>%
+  distinct(snp_id) %>%
+  slice_sample(n = 500) %>%
+  pull(snp_id)
+
+SNP_categories_bg500 <- SNP_categories %>%
+  filter(label != "Background") %>%
+  bind_rows(SNP_categories %>% filter(label == "Background", snp_id %in% bg_snps_500))
+
+p_bg_500 <- plot_heatmap_category(
+  SNP_categories_bg500,
+  "Background",
+  SNP_matrix,
+  accession_meta,
+  title = "Background (500 random SNPs)",
+  value = "binary",
+  order_snps_by = "MAF"
+)
