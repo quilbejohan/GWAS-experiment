@@ -1,0 +1,340 @@
+# ============================================================
+# 04. Compute SNP-level population-genomic metrics
+# ============================================================
+# Purpose:
+#   Compute per-SNP population-genomic metrics used in the manuscript:
+#     - MAF
+#     - FST_pop      (North vs South)
+#     - FST_founder  (Tsushima-proximal vs Mainland)
+#     - AUC_LOESS    (normalized area under the local LD-decay curve)
+#
+# Main inputs:
+#   - Lj_accessions_SNPs.csv
+#   - LotusSNP_accessions_location.csv
+#   - SNP_category
+#
+# Main output:
+#   - SNP_categories_all_metrics.csv
+#
+# Notes:
+#   - Genotypes are assumed to be coded numerically (0/1/2).
+#   - This script computes metrics only.
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(readr)
+})
+
+# -----------------------------
+# Input files
+# -----------------------------
+snp_matrix_file <- "Lj_accessions_SNPs.csv"
+accession_metadata_file <- "LotusSNP_accessions_location.csv"
+snp_category_file <- "SNP_categories_input.csv"   # <-- replace with actual input file name
+
+# -----------------------------
+# Parameters
+# -----------------------------
+ld_window_bp <- 20000
+loess_span <- 0.7
+loess_grid_n <- 200
+min_non_missing_for_ld <- 5
+
+# -----------------------------
+# Load data
+# -----------------------------
+SNP_matrix <- read.csv(snp_matrix_file, sep = ";", check.names = FALSE) %>%
+  mutate(snp_id = paste(CHR, POS, sep = "_"))
+
+accession_meta <- read.csv(accession_metadata_file, sep = ",", check.names = FALSE)
+
+SNP_categories <- read.csv(snp_category_file, sep = ",", check.names = FALSE)
+
+# harmonize focal SNP identifier
+if (!"snp_id" %in% names(SNP_categories)) {
+  if ("focal_SNP" %in% names(SNP_categories)) {
+    SNP_categories <- SNP_categories %>% mutate(snp_id = as.character(focal_SNP))
+  } else {
+    stop("SNP category file must contain either 'snp_id' or 'focal_SNP'.")
+  }
+}
+
+# genotype columns = all accession genotype columns
+meta_cols <- c("CHR", "POS", "snp_id")
+sample_cols <- setdiff(names(SNP_matrix), meta_cols)
+
+# split by chromosome once for faster access
+SNP_by_chr <- split(SNP_matrix, SNP_matrix$CHR)
+
+# -----------------------------
+# Harmonize accession metadata
+# -----------------------------
+# Expected columns in accession metadata:
+#   - accession identifier
+#   - Population (North/South)
+#   - Founder / Tsushima-Mainland grouping
+#
+# Adjust these names here if needed.
+if ("X" %in% names(accession_meta)) {
+  accession_meta <- accession_meta %>% rename(accession = X)
+}
+
+accession_meta <- accession_meta %>%
+  mutate(accession = as.character(accession))
+
+# keep only accessions present in genotype matrix
+accession_meta <- accession_meta %>%
+  filter(accession %in% sample_cols)
+
+# ---- define groups used for FST ----
+# Update these column names if needed.
+pop_col <- "Population"         # North / South
+founder_col <- "Founder_group"  # Tsushima / Mainland (or equivalent)
+
+if (!pop_col %in% names(accession_meta)) {
+  stop("Column '", pop_col, "' not found in accession metadata.")
+}
+if (!founder_col %in% names(accession_meta)) {
+  stop("Column '", founder_col, "' not found in accession metadata.")
+}
+
+north_accessions <- accession_meta %>%
+  filter(.data[[pop_col]] == "North") %>%
+  pull(accession)
+
+south_accessions <- accession_meta %>%
+  filter(.data[[pop_col]] == "South") %>%
+  pull(accession)
+
+tsushima_accessions <- accession_meta %>%
+  filter(.data[[founder_col]] == "Tsushima") %>%
+  pull(accession)
+
+mainland_accessions <- accession_meta %>%
+  filter(.data[[founder_col]] == "Mainland") %>%
+  pull(accession)
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+# -----------------------------
+# Minor allele frequency
+# -----------------------------
+compute_maf <- function(genotypes) {
+  g <- as.numeric(genotypes)
+  g <- g[is.finite(g)]
+  if (length(g) == 0) return(NA_real_)
+
+  alt_freq <- sum(g) / (2 * length(g))
+  min(alt_freq, 1 - alt_freq)
+}
+
+# -----------------------------
+# Per-SNP FST between two groups
+# Simple Ht/Hs formulation for biallelic SNPs
+# -----------------------------
+compute_fst_two_groups <- function(g1, g2) {
+  g1 <- as.numeric(g1)
+  g2 <- as.numeric(g2)
+
+  g1 <- g1[is.finite(g1)]
+  g2 <- g2[is.finite(g2)]
+
+  if (length(g1) == 0 || length(g2) == 0) return(NA_real_)
+
+  p1 <- sum(g1) / (2 * length(g1))
+  p2 <- sum(g2) / (2 * length(g2))
+  p_bar <- mean(c(p1, p2))
+
+  hs <- mean(c(2 * p1 * (1 - p1), 2 * p2 * (1 - p2)))
+  ht <- 2 * p_bar * (1 - p_bar)
+
+  if (ht == 0) return(NA_real_)
+  (ht - hs) / ht
+}
+
+# -----------------------------
+# LD table in a local window
+# -----------------------------
+ld_table_window_chr <- function(df_chr, index_pos, sample_cols, window_bp = 20000) {
+  df_win <- df_chr %>%
+    filter(POS >= (index_pos - window_bp),
+           POS <= (index_pos + window_bp))
+
+  if (nrow(df_win) < 2) return(NULL)
+
+  focal_row <- df_win %>% filter(POS == index_pos) %>% slice(1)
+  if (nrow(focal_row) == 0) return(NULL)
+
+  g_focal <- as.numeric(focal_row[, sample_cols] %>% unlist(use.names = FALSE))
+  if (stats::sd(g_focal, na.rm = TRUE) == 0 || all(is.na(g_focal))) return(NULL)
+
+  calc_r2 <- function(g) {
+    g <- as.numeric(g)
+    ok <- is.finite(g) & is.finite(g_focal)
+    if (sum(ok) < min_non_missing_for_ld) return(NA_real_)
+    if (stats::sd(g[ok]) == 0) return(NA_real_)
+    r <- suppressWarnings(stats::cor(g_focal[ok], g[ok]))
+    as.numeric(r^2)
+  }
+
+  r2_vals <- apply(df_win[, sample_cols, drop = FALSE], 1, calc_r2)
+
+  out_df <- df_win %>%
+    transmute(
+      POS = POS,
+      abs_bp = abs(POS - index_pos),
+      r2 = r2_vals
+    ) %>%
+    filter(is.finite(r2), abs_bp > 0)
+
+  if (nrow(out_df) < 10) return(NULL)
+  out_df
+}
+
+# -----------------------------
+# AUC from LOESS fit of LD decay
+# -----------------------------
+auc_from_loess <- function(ld_df, window_bp = 20000, span = 0.7, grid_n = 200) {
+  if (is.null(ld_df) || nrow(ld_df) < 10) return(NA_real_)
+
+  df <- ld_df %>%
+    mutate(abs_kb = abs_bp / 1000) %>%
+    filter(is.finite(abs_kb), is.finite(r2)) %>%
+    arrange(abs_kb)
+
+  if (nrow(df) < 10) return(NA_real_)
+
+  fit <- try(
+    stats::loess(
+      r2 ~ abs_kb,
+      data = df,
+      span = span,
+      degree = 1,
+      control = loess.control(surface = "direct")
+    ),
+    silent = TRUE
+  )
+
+  if (inherits(fit, "try-error")) return(NA_real_)
+
+  xgrid <- seq(0, window_bp / 1000, length.out = grid_n)
+  yhat <- predict(fit, newdata = data.frame(abs_kb = xgrid))
+  yhat <- pmax(pmin(yhat, 1), 0)
+
+  auc_kb <- sum(diff(xgrid) * (head(yhat, -1) + tail(yhat, -1)) / 2)
+  auc_kb / (window_bp / 1000)
+}
+
+# -----------------------------
+# Compute all metrics for one SNP
+# -----------------------------
+compute_snp_metrics <- function(snp_id,
+                                SNP_matrix,
+                                SNP_by_chr,
+                                sample_cols,
+                                north_accessions,
+                                south_accessions,
+                                tsushima_accessions,
+                                mainland_accessions,
+                                window_bp,
+                                loess_span,
+                                loess_grid_n) {
+  snp_row <- SNP_matrix %>% filter(snp_id == !!snp_id) %>% slice(1)
+  if (nrow(snp_row) == 0) {
+    return(tibble(
+      snp_id = snp_id,
+      MAF = NA_real_,
+      Fst_pop = NA_real_,
+      Fst_founder = NA_real_,
+      AUC_LOESS = NA_real_
+    ))
+  }
+
+  chr <- snp_row$CHR[[1]]
+  pos <- snp_row$POS[[1]]
+
+  geno_all <- snp_row[, sample_cols] %>% unlist(use.names = TRUE)
+
+  maf_val <- compute_maf(geno_all)
+
+  geno_north <- snp_row[, intersect(north_accessions, sample_cols), drop = FALSE] %>% unlist(use.names = FALSE)
+  geno_south <- snp_row[, intersect(south_accessions, sample_cols), drop = FALSE] %>% unlist(use.names = FALSE)
+  fst_pop_val <- compute_fst_two_groups(geno_north, geno_south)
+
+  geno_tsushima <- snp_row[, intersect(tsushima_accessions, sample_cols), drop = FALSE] %>% unlist(use.names = FALSE)
+  geno_mainland <- snp_row[, intersect(mainland_accessions, sample_cols), drop = FALSE] %>% unlist(use.names = FALSE)
+  fst_founder_val <- compute_fst_two_groups(geno_tsushima, geno_mainland)
+
+  df_chr <- SNP_by_chr[[as.character(chr)]]
+  ld_df <- ld_table_window_chr(
+    df_chr = df_chr,
+    index_pos = pos,
+    sample_cols = sample_cols,
+    window_bp = window_bp
+  )
+
+  auc_val <- auc_from_loess(
+    ld_df = ld_df,
+    window_bp = window_bp,
+    span = loess_span,
+    grid_n = loess_grid_n
+  )
+
+  tibble(
+    snp_id = snp_id,
+    MAF = maf_val,
+    Fst_pop = fst_pop_val,
+    Fst_founder = fst_founder_val,
+    AUC_LOESS = auc_val
+  )
+}
+
+# ============================================================
+# Compute metrics for all SNPs in category table
+# ============================================================
+
+focal_snps <- SNP_categories %>%
+  distinct(snp_id) %>%
+  pull(snp_id)
+
+message("Computing SNP metrics for ", length(focal_snps), " focal SNPs...")
+
+metric_table <- lapply(seq_along(focal_snps), function(i) {
+  if (i %% 200 == 0) {
+    message(i, "/", length(focal_snps))
+  }
+
+  compute_snp_metrics(
+    snp_id = focal_snps[i],
+    SNP_matrix = SNP_matrix,
+    SNP_by_chr = SNP_by_chr,
+    sample_cols = sample_cols,
+    north_accessions = north_accessions,
+    south_accessions = south_accessions,
+    tsushima_accessions = tsushima_accessions,
+    mainland_accessions = mainland_accessions,
+    window_bp = ld_window_bp,
+    loess_span = loess_span,
+    loess_grid_n = loess_grid_n
+  )
+}) %>%
+  bind_rows()
+
+# ============================================================
+# Join back to SNP category table and export
+# ============================================================
+
+SNP_categories_all_metrics <- SNP_categories %>%
+  left_join(metric_table, by = "snp_id")
+
+write.csv(
+  SNP_categories_all_metrics,
+  file = "SNP_categories_all_metrics.csv",
+  row.names = FALSE
+)
+
+message("Done. Wrote: SNP_categories_all_metrics.csv")
