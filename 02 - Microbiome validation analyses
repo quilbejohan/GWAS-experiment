@@ -1,0 +1,683 @@
+# ============================================================
+# 02. Microbiome validation analyses
+# ============================================================
+# Purpose:
+#   Run the downstream microbiome analyses used for:
+#     1. SynCom LORE1 experiment
+#     2. Utobara natural-soil LORE1 experiment
+#     3. Utobara natural-soil haplotype experiment
+#     4. Combined LORE1 + haplotype comparison
+#
+# Required input files:
+#   - dada2_LjRootnames_SynCom_LORE1.csv
+#   - metadata_SC_LORE1.csv
+#   - otu_table_Utobara_LORE1.csv
+#   - metadata_Utobara_LORE1.csv
+#   - otu_table_Utobara_Haplotype.csv
+#   - metadata_Utobara_Haplotype.csv
+#   - metadata_combined.csv
+#
+# Notes:
+#   - This script starts from processed count tables and metadata.
+#   - It reproduces ordination, PERMANOVA / pairwise MANOVA,
+#     ANCOM-BC, and figure-oriented abundance summaries.
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(ggrepel)
+  library(ANCOMBC)
+  library(vegan)
+  library(phyloseq)
+  library(DESeq2)
+  library(RVAideMemoire)
+  library(reshape2)
+})
+
+# -----------------------------
+# Global parameters
+# -----------------------------
+rarefaction_seed <- 42
+permanova_nperm <- 999
+
+# -----------------------------
+# Helper functions
+# -----------------------------
+load_phyloseq_table <- function(count_file,
+                                metadata_file,
+                                count_sep = ",",
+                                metadata_sep = ";",
+                                transpose_counts = FALSE,
+                                remove_taxa = NULL) {
+  counts <- read.csv(count_file, header = TRUE, row.names = 1,
+                     sep = count_sep, dec = ".", check.names = FALSE)
+  metadata <- read.csv(metadata_file, header = TRUE, row.names = 1,
+                       sep = metadata_sep, dec = ".", check.names = FALSE)
+
+  count_matrix <- as.matrix(counts)
+  if (transpose_counts) {
+    count_matrix <- t(count_matrix)
+  }
+
+  if (!is.null(remove_taxa)) {
+    count_matrix <- count_matrix[!rownames(count_matrix) %in% remove_taxa, , drop = FALSE]
+  }
+
+  physeq <- phyloseq(
+    otu_table(count_matrix, taxa_are_rows = TRUE),
+    sample_data(metadata)
+  )
+  sample_data(physeq)$Sample_ID <- rownames(sample_data(physeq))
+  physeq
+}
+
+filter_rarefy_phyloseq <- function(physeq,
+                                   sample_threshold = NULL,
+                                   taxon_threshold = NULL,
+                                   subset_expr = NULL,
+                                   rngseed = 42) {
+  phy_out <- physeq
+
+  if (!is.null(sample_threshold)) {
+    keep_samples <- sample_sums(phy_out) >= sample_threshold
+    phy_out <- prune_samples(keep_samples, phy_out)
+  }
+
+  if (!is.null(taxon_threshold)) {
+    keep_taxa <- taxa_sums(phy_out) >= taxon_threshold
+    phy_out <- prune_taxa(keep_taxa, phy_out)
+  }
+
+  if (!is.null(subset_expr)) {
+    phy_out <- subset_samples(phy_out, eval(parse(text = subset_expr)))
+  }
+
+  min_depth <- min(sample_sums(phy_out))
+  rarefy_even_depth(phy_out, rngseed = rngseed, sample.size = min_depth, verbose = FALSE)
+}
+
+subset_phyloseq <- function(physeq, ...) {
+  subset_samples(physeq, ...)
+}
+
+remove_named_sample <- function(physeq, sample_column, sample_name) {
+  subset_samples(physeq, get(sample_column) != sample_name)
+}
+
+make_mds_table <- function(physeq, distance_method = "bray") {
+  distance_matrix <- phyloseq::distance(physeq, method = distance_method, weighted = TRUE)
+  mds_result <- cmdscale(distance_matrix, k = 2)
+
+  out <- data.frame(
+    MDS1 = mds_result[, 1],
+    MDS2 = mds_result[, 2]
+  )
+
+  sample_df <- as.data.frame(sample_data(physeq))
+  cbind(out, sample_df[rownames(out), , drop = FALSE])
+}
+
+plot_mds <- function(mds_df, color_var, shape_var = NULL,
+                     colors = NULL, shapes = NULL,
+                     title = NULL, point_size = 8) {
+  p <- ggplot(mds_df, aes_string(x = "MDS1", y = "MDS2", color = color_var, shape = shape_var)) +
+    geom_point(size = point_size, alpha = 0.9) +
+    labs(title = title, x = "MDS1", y = "MDS2") +
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(linewidth = 0.5, color = "black"),
+      axis.text = element_text(size = 14),
+      legend.title = element_blank(),
+      legend.text = element_text(size = 18, color = "black"),
+      axis.title = element_text(size = 14),
+      plot.title = element_text(size = 16)
+    )
+
+  if (!is.null(colors)) {
+    p <- p + scale_color_manual(values = colors)
+  }
+  if (!is.null(shapes)) {
+    p <- p + scale_shape_manual(values = shapes)
+  }
+
+  p
+}
+
+run_permanova_manova <- function(mds_df, formula_str) {
+  dist_matrix <- vegdist(mds_df[, c("MDS1", "MDS2")], method = "euclidean")
+  formula_obj <- as.formula(paste("dist_matrix ~", formula_str))
+
+  permanova_res <- adonis2(formula_obj, data = mds_df, permutations = permanova_nperm)
+
+  grouping_var <- all.vars(as.formula(paste("~", formula_str)))[1]
+  manova_res <- pairwise.perm.manova(dist_matrix, mds_df[[grouping_var]], nperm = permanova_nperm)
+
+  list(permanova = permanova_res, manova = manova_res)
+}
+
+run_ancombc2 <- function(physeq, formula_var, group_var, tax_level = "Species") {
+  ancombc2(
+    data = physeq,
+    tax_level = tax_level,
+    fix_formula = formula_var,
+    p_adj_method = "holm",
+    prv_cut = 0.10,
+    lib_cut = 1000,
+    group = group_var,
+    struc_zero = TRUE,
+    neg_lb = TRUE,
+    alpha = 0.05,
+    global = TRUE,
+    n_cl = 1,
+    verbose = TRUE,
+    dunnet = TRUE
+  )
+}
+
+make_volcano_df <- function(ancom_res, q_col, lfc_col) {
+  res <- ancom_res$res
+  res[[paste0("log_", q_col)]] <- -log10(res[[q_col]])
+  res$significant <- ifelse(res[[q_col]] < 0.05, "Yes", "No")
+  res
+}
+
+plot_volcano <- function(res_df, x_col, y_col, label_col = "taxon",
+                         sig_col = "significant",
+                         title = "Volcano Plot",
+                         xlab = NULL, ylab = NULL) {
+  ggplot(res_df, aes_string(x = x_col, y = y_col, color = sig_col, label = label_col)) +
+    geom_point(size = 5, alpha = 0.8) +
+    geom_text_repel(
+      data = subset(res_df, significant == "Yes"),
+      box.padding = 0.5,
+      point.padding = 0.1,
+      segment.alpha = 0,
+      color = "black",
+      size = 3
+    ) +
+    scale_color_manual(values = c("No" = "gray50", "Yes" = "firebrick3")) +
+    labs(title = title, x = xlab, y = ylab) +
+    theme_minimal()
+}
+
+melt_phyloseq_abundance <- function(physeq) {
+  physeq_data <- as.data.frame(otu_table(physeq))
+  physeq_data$Taxa <- rownames(physeq_data)
+
+  melted <- reshape2::melt(
+    physeq_data,
+    id.vars = "Taxa",
+    variable.name = "Sample_ID",
+    value.name = "Abundance"
+  )
+
+  melted <- melted[melted$Sample_ID != "Sample_name", , drop = FALSE]
+  melted$Abundance <- as.numeric(melted$Abundance)
+  melted
+}
+
+summarise_replicate_abundance <- function(melted_df, replicate_list) {
+  melted_df %>%
+    filter(Sample_ID %in% unlist(replicate_list)) %>%
+    group_by(
+      Taxa,
+      Group = case_when(
+        !!!lapply(names(replicate_list), function(grp) {
+          rlang::expr(Sample_ID %in% !!replicate_list[[grp]] ~ !!grp)
+        })
+      )
+    ) %>%
+    summarize(Average_Abundance = mean(Abundance), .groups = "drop")
+}
+
+plot_relative_abundance <- function(df, x_var = "Group", y_var = "Average_Abundance",
+                                    fill_var = "Taxa", title = NULL, flip = FALSE) {
+  p <- ggplot(df, aes_string(x = x_var, y = y_var, fill = fill_var)) +
+    geom_bar(stat = "identity", position = "fill", color = "gray23", width = 0.9) +
+    labs(y = "Relative abundance", title = title) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),
+      axis.text.y = element_text(size = 12),
+      plot.background = element_rect(fill = "gray98"),
+      axis.line = element_line(color = "black"),
+      axis.title.y = element_blank(),
+      axis.text = element_text(color = "black"),
+      axis.title = element_text(color = "black"),
+      plot.title = element_text(color = "black"),
+      legend.position = "none"
+    )
+
+  if (flip) {
+    p <- p + coord_flip()
+  }
+  p
+}
+
+# ============================================================
+# 2A. SynCom LORE1 experiment
+# ============================================================
+
+syncom_phy <- load_phyloseq_table(
+  count_file = "dada2_LjRootnames_SynCom_LORE1.csv",
+  metadata_file = "metadata_SC_LORE1.csv",
+  count_sep = ",",
+  metadata_sep = ";",
+  transpose_counts = FALSE
+)
+
+syncom_phy_rarefied <- filter_rarefy_phyloseq(
+  syncom_phy,
+  taxon_threshold = 2000,
+  subset_expr = "Genotype2 %in% c('Gifu', 'roomie1')",
+  rngseed = rarefaction_seed
+)
+
+syncom_rz <- subset_phyloseq(syncom_phy_rarefied, Compartment == "RZ")
+
+syncom_mds <- make_mds_table(syncom_rz)
+syncom_mds$Genotype <- factor(gsub("_", "-", syncom_mds$Genotype))
+
+syncom_colors <- c(
+  "Gifu" = "gray20",
+  "roomie1-1" = "dodgerblue2",
+  "roomie1-2" = "springgreen2"
+)
+
+plot_mds(
+  syncom_mds,
+  color_var = "Genotype",
+  colors = syncom_colors,
+  title = "Rhizosphere"
+)
+
+syncom_stats_by_allele <- run_permanova_manova(
+  subset(syncom_mds, Genotype %in% c("Gifu", "roomie1-1", "roomie1-2")),
+  formula_str = "Genotype"
+)
+
+# pooled mutant analysis
+syncom_mds_pooled <- syncom_mds
+syncom_mds_pooled$Genotype2 <- factor(sample_data(syncom_rz)$Genotype2)
+
+plot_mds(
+  syncom_mds_pooled,
+  color_var = "Genotype2",
+  colors = c("Gifu" = "gray20", "roomie1" = "dodgerblue2"),
+  title = "Rhizosphere"
+)
+
+syncom_stats_pooled <- run_permanova_manova(
+  subset(syncom_mds_pooled, Genotype2 %in% c("Gifu", "roomie1")),
+  formula_str = "Genotype2"
+)
+
+# ANCOM-BC
+syncom_phy_ancom <- filter_rarefy_phyloseq(
+  syncom_phy,
+  taxon_threshold = 2000,
+  subset_expr = "Genotype2 %in% c('Gifu', 'roomie1', 'CFI')",
+  rngseed = rarefaction_seed
+)
+
+syncom_rz_ancom <- subset_phyloseq(syncom_phy_ancom, Compartment == "RZ")
+syncom_gifu_vs_roomie <- subset_phyloseq(syncom_rz_ancom, Genotype2 %in% c("Gifu", "roomie1"))
+
+ancom_syncom <- run_ancombc2(
+  physeq = syncom_gifu_vs_roomie,
+  formula_var = "Genotype2",
+  group_var = "Genotype2",
+  tax_level = "Species"
+)
+
+syncom_volcano_df <- make_volcano_df(
+  ancom_syncom,
+  q_col = "q_Genotype2roomie1",
+  lfc_col = "lfc_Genotype2roomie1"
+)
+
+plot_volcano(
+  syncom_volcano_df,
+  x_col = "lfc_Genotype2roomie1",
+  y_col = "log_q_Genotype2roomie1",
+  title = "SynCom LORE1",
+  xlab = "log2 fold change (roomie1 vs Gifu)",
+  ylab = "-log10(q value)"
+)
+
+# Relative abundance barplots
+syncom_rel <- transform_sample_counts(syncom_phy_ancom, function(x) x / sum(x))
+syncom_rel_rz <- subset_phyloseq(syncom_rel, Compartment == "RZ")
+syncom_rel_rz <- subset_phyloseq(syncom_rel_rz, Genotype %in% c("Gifu", "roomie1_1", "roomie1_2"))
+
+syncom_melted <- melt_phyloseq_abundance(syncom_rel_rz)
+
+syncom_replicates <- list(
+  "Gifu" = c("Gifu_RZ_1", "Gifu_RZ_2", "Gifu_RZ_3", "Gifu_RZ_4", "Gifu_RZ_5", "Gifu_RZ_6",
+             "Gifu_RZ_7", "Gifu_RZ_8", "Gifu_RZ_9", "Gifu_RZ_10", "Gifu_RZ_11", "Gifu_RZ_12"),
+  "roomie1_1" = c("roomie1_1_RZ_1", "roomie1_1_RZ_2", "roomie1_1_RZ_3", "roomie1_1_RZ_4", "roomie1_1_RZ_5", "roomie1_1_RZ_6"),
+  "roomie1_2" = c("roomie1_2_RZ_1", "roomie1_2_RZ_2", "roomie1_2_RZ_3", "roomie1_2_RZ_4", "roomie1_2_RZ_5", "roomie1_2_RZ_6")
+)
+
+syncom_abundance_summary <- summarise_replicate_abundance(syncom_melted, syncom_replicates)
+
+plot_relative_abundance(
+  syncom_abundance_summary,
+  title = "Relative abundance of bacterial isolates"
+)
+
+# ============================================================
+# 2B. Utobara natural-soil LORE1 experiment
+# ============================================================
+
+utobara_lore1_phy <- load_phyloseq_table(
+  count_file = "otu_table_Utobara_LORE1.csv",
+  metadata_file = "metadata_Utobara_LORE1.csv",
+  count_sep = ";",
+  metadata_sep = ";",
+  transpose_counts = TRUE
+)
+
+utobara_lore1_rarefied <- filter_rarefy_phyloseq(
+  utobara_lore1_phy,
+  sample_threshold = 5000,
+  subset_expr = "Genotype %in% c('Gifu', 'roomie1-1', 'roomie1-2')",
+  rngseed = rarefaction_seed
+)
+
+utobara_lore1_rz <- subset_phyloseq(utobara_lore1_rarefied, Compartment == "Rhizosphere")
+utobara_lore1_rz <- subset_phyloseq(utobara_lore1_rz, Soil == "Utobara")
+utobara_lore1_rz <- remove_named_sample(
+  utobara_lore1_rz,
+  sample_column = "Sample_name",
+  sample_name = "NLEAP1_1_Utobara_Rhizosphere"
+)
+
+utobara_lore1_mds <- make_mds_table(utobara_lore1_rz)
+
+plot_mds(
+  utobara_lore1_mds,
+  color_var = "Genotype",
+  colors = syncom_colors
+)
+
+utobara_lore1_stats_pooled <- run_permanova_manova(
+  subset(utobara_lore1_mds, Genotype2 %in% c("Gifu", "roomie1")),
+  formula_str = "Genotype2"
+)
+
+utobara_lore1_stats_alleles <- run_permanova_manova(
+  subset(utobara_lore1_mds, Genotype %in% c("Gifu", "roomie1-1", "roomie1-2")),
+  formula_str = "Genotype"
+)
+
+ancom_utobara_lore1 <- run_ancombc2(
+  physeq = subset_phyloseq(utobara_lore1_rz, Genotype2 %in% c("Gifu", "roomie1")),
+  formula_var = "Genotype2",
+  group_var = "Genotype2",
+  tax_level = "Species"
+)
+
+utobara_lore1_volcano_df <- make_volcano_df(
+  ancom_utobara_lore1,
+  q_col = "q_Genotype2roomie1",
+  lfc_col = "lfc_Genotype2roomie1"
+)
+
+plot_volcano(
+  utobara_lore1_volcano_df,
+  x_col = "lfc_Genotype2roomie1",
+  y_col = "log_q_Genotype2roomie1",
+  title = "Utobara LORE1",
+  xlab = "log2 fold change (roomie1 vs Gifu)",
+  ylab = "-log10(q value)"
+)
+
+# Relative abundance summaries
+utobara_lore1_rel <- transform_sample_counts(utobara_lore1_rz, function(x) x / sum(x))
+utobara_lore1_melted <- melt_phyloseq_abundance(utobara_lore1_rel)
+
+utobara_lore1_replicates <- list(
+  "Gifu_RZ" = c("Rh-121", "Rh-122", "Rh-123"),
+  "roomie1_1_RZ" = c("Rh-151", "Rh-152", "Rh-153", "Rh-154", "Rh-155", "Rh-156"),
+  "roomie1_2_RZ" = c("Rh-170", "Rh-171", "Rh-172", "Rh-173", "Rh-174")
+)
+
+utobara_lore1_summary <- summarise_replicate_abundance(
+  utobara_lore1_melted,
+  utobara_lore1_replicates
+)
+
+plot_relative_abundance(
+  utobara_lore1_summary,
+  title = "Relative abundance of bacterial genera"
+)
+
+# ============================================================
+# 2C. Utobara natural haplotype experiment
+# ============================================================
+
+utobara_hap_phy <- load_phyloseq_table(
+  count_file = "otu_table_Utobara_Haplotype.csv",
+  metadata_file = "metadata_Utobara_Haplotype.csv",
+  count_sep = ",",
+  metadata_sep = ";",
+  transpose_counts = TRUE
+)
+
+utobara_hap_rarefied <- filter_rarefy_phyloseq(
+  utobara_hap_phy,
+  sample_threshold = 1000,
+  subset_expr = "Genotype %in% c('UBS02', 'UCS04', 'UDS03', 'UAS01', 'UCS03', 'UCS01', 'Gifu')",
+  rngseed = rarefaction_seed
+)
+
+utobara_hap_rz <- subset_phyloseq(utobara_hap_rarefied, Compartment == "RZ")
+utobara_hap_mds <- make_mds_table(utobara_hap_rz)
+
+hap_colors <- c("Ref_Ref" = "gray20", "Alt_Ref" = "firebrick2", "Ref_Alt" = "orchid2")
+
+plot_mds(
+  utobara_hap_mds,
+  color_var = "State",
+  colors = hap_colors
+)
+
+utobara_hap_stats <- run_permanova_manova(
+  subset(utobara_hap_mds, State %in% c("Ref_Ref", "Ref_Alt", "Alt_Ref")),
+  formula_str = "State + Genotype"
+)
+
+# Relative abundance summary
+utobara_hap_rel <- transform_sample_counts(utobara_hap_rz, function(x) x / sum(x))
+utobara_hap_melted <- melt_phyloseq_abundance(utobara_hap_rel)
+
+utobara_hap_replicates <- list(
+  "Ref_Ref" = c("Rh-Gifu1", "Rh-Gifu2", "Rh-Gifu3", "Rh-Gifu4"),
+  "Ref_Alt" = c("Rh-29", "Rh-30", "Rh-31", "Rh-32", "Rh-41", "Rh-42", "Rh-43", "Rh-44", "Rh-53", "Rh-54", "Rh-55", "Rh-56"),
+  "Alt_Ref" = c("Rh-65", "Rh-66", "Rh-67", "Rh-68", "Rh-77", "Rh-78", "Rh-79", "Rh-80", "Rh-89", "Rh-90", "Rh-91", "Rh-92")
+)
+
+utobara_hap_summary <- summarise_replicate_abundance(
+  utobara_hap_melted,
+  utobara_hap_replicates
+)
+
+plot_relative_abundance(
+  utobara_hap_summary,
+  title = "Relative abundance"
+)
+
+# CAP analysis without Gifu
+utobara_hap_cap <- load_phyloseq_table(
+  count_file = "otu_table_Utobara_Haplotype.csv",
+  metadata_file = "metadata_Utobara_Haplotype.csv",
+  count_sep = ",",
+  metadata_sep = ";",
+  transpose_counts = TRUE
+)
+
+cap_counts <- as(otu_table(utobara_hap_cap), "matrix")
+cap_counts <- cap_counts[rowSums(cap_counts) > 100, , drop = FALSE]
+cap_counts <- round(decostand(cap_counts, method = "total", MARGIN = 2) * 100000)
+
+utobara_hap_cap_phy <- phyloseq(
+  otu_table(cap_counts, taxa_are_rows = TRUE),
+  sample_data(sample_data(utobara_hap_cap))
+)
+
+utobara_hap_cap_phy <- subset_phyloseq(utobara_hap_cap_phy, Compartment == "RZ")
+utobara_hap_cap_phy <- subset_phyloseq(utobara_hap_cap_phy, Genotype %in% c("UBS02", "UCS04", "UDS03", "UAS01", "UCS03", "UCS01"))
+
+cap_ord <- ordinate(utobara_hap_cap_phy, method = "CAP", distance = "cao", formula = ~ Genotype)
+cap_df <- plot_ordination(utobara_hap_cap_phy, ordination = cap_ord, type = "samples", axes = 1:4, justDF = TRUE)
+
+ggplot(cap_df, aes(x = CAP1, y = CAP2, color = State, shape = Genotype)) +
+  geom_point(size = 7, alpha = 0.8) +
+  scale_color_manual(values = c("Alt_Ref" = "firebrick2", "Ref_Alt" = "orchid2")) +
+  scale_shape_manual(values = c("UBS02" = 15, "UCS04" = 16, "UDS03" = 17, "UAS01" = 9, "UCS03" = 6, "UCS01" = 7)) +
+  xlab("CAP1") +
+  ylab("CAP2") +
+  theme_minimal()
+
+# ANCOM-BC haplotype
+ancom_utobara_hap <- run_ancombc2(
+  physeq = subset_phyloseq(utobara_hap_rz, State2 %in% c("Ref", "Alt")),
+  formula_var = "State2",
+  group_var = "State2",
+  tax_level = "Species"
+)
+
+utobara_hap_volcano_df <- make_volcano_df(
+  ancom_utobara_hap,
+  q_col = "q_State2Ref",
+  lfc_col = "lfc_State2Ref"
+)
+
+utobara_hap_volcano_df$lfc_State2Ref <- utobara_hap_volcano_df$lfc_State2Ref * -1
+
+plot_volcano(
+  utobara_hap_volcano_df,
+  x_col = "lfc_State2Ref",
+  y_col = "log_q_State2Ref",
+  title = "Utobara haplotypes",
+  xlab = "log2 fold change (Alt vs Ref)",
+  ylab = "-log10(q value)"
+)
+
+# ============================================================
+# 2D. Figure-ready highlighted volcano plots
+# ============================================================
+
+volcano_ULORE1 <- read.csv(
+  "volcano_ULORE1_highlight.csv",
+  header = TRUE,
+  row.names = 1,
+  sep = ";",
+  dec = "."
+)
+
+volcano_ULORE1$log_q_Genotype2NLEAP <- -log10(volcano_ULORE1$q_Genotype2NLEAP)
+volcano_ULORE1$significant <- ifelse(volcano_ULORE1$q_Genotype2NLEAP < 0.05, "Yes", "No")
+
+ggplot(volcano_ULORE1, aes(x = lfc_Genotype2NLEAP, y = log_q_Genotype2NLEAP, color = Common, shape = significant, label = taxon)) +
+  geom_point(size = 5, alpha = 0.8) +
+  geom_text_repel(data = subset(volcano_ULORE1, Common %in% c("Positive", "Negative")),
+                  box.padding = 0.5, point.padding = 0.1, segment.alpha = 0, color = "black", size = 4) +
+  scale_color_manual(values = c("Positive" = "firebrick2", "Negative" = "goldenrod2", "Non_common" = "gray40")) +
+  scale_shape_manual(values = c("Yes" = 16, "No" = 15)) +
+  labs(x = "log2 fold change (roomie1 vs Gifu)", y = "-log10(q value)") +
+  theme_minimal()
+
+volcano_UHAPLOTYPE <- read.csv(
+  "volcano_UHAPLOTYPE_highlight.csv",
+  header = TRUE,
+  row.names = 1,
+  sep = ";",
+  dec = "."
+)
+
+ggplot(volcano_UHAPLOTYPE, aes(x = lfc_State2Ref, y = log_q_State2Ref, color = Common, shape = significant, label = taxon)) +
+  geom_point(size = 5, alpha = 0.8) +
+  geom_text_repel(data = subset(volcano_UHAPLOTYPE, Common %in% c("Positive", "Negative")),
+                  box.padding = 0.5, point.padding = 0.1, segment.alpha = 0, color = "black", size = 4) +
+  scale_color_manual(values = c("Positive" = "firebrick2", "Negative" = "goldenrod2", "Non_common" = "gray40")) +
+  scale_shape_manual(values = c("Yes" = 16, "No" = 15)) +
+  labs(x = "log2 fold change (Alt vs Ref)", y = "-log10(q value)") +
+  theme_minimal()
+
+# ============================================================
+# 2E. Combined Utobara LORE1 + haplotype analysis
+# ============================================================
+
+df_lore1 <- read.csv("otu_table_Utobara_LORE1.csv", header = TRUE, row.names = 1, sep = ";", dec = ".")
+df_haplotype <- read.csv("otu_table_Utobara_Haplotype.csv", header = TRUE, row.names = 1, sep = ",", dec = ".")
+metadata_combined <- read.csv("metadata_combined.csv", header = TRUE, row.names = 1, sep = ";", dec = ".")
+
+common_columns <- intersect(colnames(df_lore1), colnames(df_haplotype))
+df_lore1 <- df_lore1[, common_columns, drop = FALSE]
+df_haplotype <- df_haplotype[, common_columns, drop = FALSE]
+
+combined_df <- rbind(df_lore1, df_haplotype)
+combined_matrix <- as.matrix(t(combined_df))
+
+combined_phy <- phyloseq(
+  otu_table(combined_matrix, taxa_are_rows = TRUE),
+  sample_data(metadata_combined)
+)
+
+sample_data(combined_phy)$Sample_ID <- rownames(sample_data(combined_phy))
+
+combined_phy <- filter_rarefy_phyloseq(
+  combined_phy,
+  sample_threshold = 5000,
+  subset_expr = "Soil %in% 'Utobara'",
+  rngseed = rarefaction_seed
+)
+
+combined_phy <- subset_phyloseq(combined_phy, Compartment == "Rhizosphere")
+combined_phy <- subset_phyloseq(combined_phy, !(Genotype %in% c("CFI1", "CFI2")))
+combined_phy <- remove_named_sample(
+  combined_phy,
+  sample_column = "Sample_name",
+  sample_name = "NLEAP1_1_Utobara_Rhizosphere"
+)
+
+combined_mds <- make_mds_table(combined_phy)
+
+ggplot(combined_mds, aes(x = MDS1, y = MDS2, color = State, shape = Experiment)) +
+  geom_point(size = 8, alpha = 0.8) +
+  scale_color_manual(values = c(
+    "Ref_Ref" = "gray20",
+    "Alt_Ref" = "firebrick2",
+    "Ref_Alt" = "orchid2",
+    "roomie1-1" = "dodgerblue",
+    "roomie1-2" = "springgreen2"
+  )) +
+  scale_shape_manual(values = c("LORE1" = 16, "HAPLOTYPE" = 15)) +
+  labs(title = "Rhizosphere Utobara integrated", x = "MDS1", y = "MDS2") +
+  theme_minimal()
+
+combined_stats_roomie <- run_permanova_manova(
+  subset(combined_mds, Genotype2 %in% c("Gifu", "roomie1")),
+  formula_str = "Genotype2"
+)
+
+combined_stats_background <- run_permanova_manova(
+  subset(combined_mds, State2 %in% c("Ref", "LORE1", "Alt")),
+  formula_str = "State2"
+)
+
+combined_stats_detailed <- run_permanova_manova(
+  subset(combined_mds, State %in% c("Ref_Ref", "roomie1-1", "roomie1-2", "Ref_Alt", "Alt_Ref")),
+  formula_str = "State"
+)
+
+combined_stats_multivar <- adonis2(
+  vegdist(subset(combined_mds, State %in% c("Ref_Ref", "roomie1-1", "roomie1-2", "Ref_Alt", "Alt_Ref"))[, c("MDS1", "MDS2")], method = "euclidean") ~ State2 + Genotype2,
+  data = subset(combined_mds, State %in% c("Ref_Ref", "roomie1-1", "roomie1-2", "Ref_Alt", "Alt_Ref")),
+  permutations = permanova_nperm
+)
