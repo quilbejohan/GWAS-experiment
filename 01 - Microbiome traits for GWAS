@@ -1,0 +1,232 @@
+# ============================================================
+# 01. Prepare microbiome-derived GWAS traits from QIIME2 output
+# ============================================================
+# Purpose:
+#   Starting from the QIIME2/VSEARCH feature table and sample metadata,
+#   this script:
+#     1. filters low-depth samples and low-prevalence taxa
+#     2. rarefies the count table
+#     3. exports the rarefied OTU table
+#     4. computes ordinations (NMDS and MDS)
+#     5. exports replicate-specific ordination coordinates for GWAS
+#
+# Main outputs:
+#   - phy_rarefied_GWAS.csv
+#   - rep1Nova_MDS.csv / rep2Nova_MDS.csv / rep3Nova_MDS.csv
+#   - sub2Nova_nMDS.csv / sub3Nova_nMDS.csv (and rep1 if desired)
+#
+# Notes:
+#   - Reproduction starts from processed QIIME2 output (.qza) and metadata.
+#   - This script generates phenotype tables used downstream for GWAS.
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(qiime2R)
+  library(phyloseq)
+  library(vegan)
+  library(ggplot2)
+  library(dplyr)
+  library(tibble)
+})
+
+# -----------------------------
+# Input files
+# -----------------------------
+qza_file <- "table_99.qza"
+metadata_file <- "metadataRep.txt"
+
+# -----------------------------
+# Parameters
+# -----------------------------
+min_sample_reads <- 2000   # remove low-depth samples
+min_taxon_prevalence <- 50 # retain taxa present in at least 50 samples
+rarefaction_seed <- 42
+
+# -----------------------------
+# Load feature table
+# -----------------------------
+table_qza <- read_qza(qza_file)
+otu_table_raw <- table_qza$data
+
+# If needed, remove non-feature rows before filtering.
+# The original legacy script stored "Genotype" in the first row, but the
+# downstream workflow assumes an OTU/ASV count matrix. Adjust here only if
+# your imported table still contains non-count rows.
+# Example:
+# otu_table_raw <- otu_table_raw[rownames(otu_table_raw) != "Genotype", ]
+
+# -----------------------------
+# Filter samples and taxa
+# -----------------------------
+otu_table_filtered <- otu_table_raw[, colSums(otu_table_raw) > min_sample_reads]
+otu_table_filtered <- otu_table_filtered[
+  apply(otu_table_filtered, 1, function(x) sum(x > 0)) >= min_taxon_prevalence,
+]
+
+# -----------------------------
+# Load and align metadata
+# -----------------------------
+metadata <- read.delim(metadata_file, row.names = 1, check.names = FALSE)
+metadata <- metadata[colnames(otu_table_filtered), , drop = FALSE]
+
+stopifnot(identical(rownames(metadata), colnames(otu_table_filtered)))
+
+# -----------------------------
+# Build phyloseq object
+# -----------------------------
+phy <- phyloseq(
+  otu_table(as.matrix(otu_table_filtered), taxa_are_rows = TRUE),
+  sample_data(metadata)
+)
+
+# -----------------------------
+# Rarefy and export OTU table
+# -----------------------------
+phy_rarefied <- rarefy_even_depth(
+  phy,
+  rngseed = rarefaction_seed,
+  replace = FALSE,
+  verbose = FALSE
+)
+
+otu_rarefied <- as.data.frame(otu_table(phy_rarefied))
+write.table(
+  otu_rarefied,
+  file = "phy_rarefied_GWAS.csv",
+  row.names = TRUE,
+  col.names = TRUE,
+  sep = ",",
+  dec = "."
+)
+
+# -----------------------------
+# Optional exploratory analyses
+# -----------------------------
+# Alpha diversity placeholder
+alpha_phy <- prune_taxa(taxa_sums(phy_rarefied) > 0, phy_rarefied)
+
+# Beta diversity / PERMANOVA
+adonis_cao <- adonis2(phyloseq::distance(phy_rarefied, method = "cao") ~ Genotype, data = metadata)
+adonis_bray <- adonis2(phyloseq::distance(phy_rarefied, method = "bray") ~ Genotype, data = metadata)
+adonis_eucl <- adonis2(phyloseq::distance(phy_rarefied, method = "euclidean") ~ Genotype, data = metadata)
+adonis_jacc <- adonis2(phyloseq::distance(phy_rarefied, method = "jaccard") ~ Genotype, data = metadata)
+
+# -----------------------------
+# Ordination helper
+# -----------------------------
+compute_ordinations <- function(physeq_obj) {
+  nmds <- ordinate(physeq_obj, method = "NMDS", distance = "cao")
+  nmds_df <- plot_ordination(physeq_obj, nmds, type = "samples", axes = 1:8, justDF = TRUE)
+
+  mds <- ordinate(physeq_obj, method = "MDS", distance = "bray")
+  mds_df <- plot_ordination(physeq_obj, mds, type = "samples", axes = 1:8, justDF = TRUE)
+
+  mds_var_explained <- round(mds$values$Relative_eig[1:8] * 100, 2)
+
+  list(
+    nmds = nmds,
+    nmds_df = nmds_df,
+    mds = mds,
+    mds_df = mds_df,
+    mds_var_explained = mds_var_explained
+  )
+}
+
+# -----------------------------
+# Global ordinations
+# -----------------------------
+ord_all <- compute_ordinations(phy_rarefied)
+
+# Example exploratory plot
+ggplot(ord_all$nmds_df, aes(x = NMDS1, y = NMDS2, color = Genotype)) +
+  geom_point() +
+  geom_text(aes(label = Genotype), size = 3, show.legend = FALSE) +
+  theme_bw()
+
+# -----------------------------
+# Replicate-specific GWAS traits
+# -----------------------------
+# Assumes replicate information is encoded in sample names as _1 / _2 / _3
+# and that the samples of interest contain "Gifu" or "MG" in their names,
+# matching the original workflow.
+
+make_replicate_subset <- function(otu_df, metadata_df, replicate_suffix) {
+  sub_counts <- otu_df %>%
+    dplyr::select(contains(replicate_suffix)) %>%
+    dplyr::select(contains(c("Gifu", "MG")))
+
+  sub_metadata <- metadata_df[colnames(sub_counts), , drop = FALSE]
+  stopifnot(identical(rownames(sub_metadata), colnames(sub_counts)))
+
+  phy_sub <- phyloseq(
+    otu_table(as.matrix(sub_counts), taxa_are_rows = TRUE),
+    sample_data(sub_metadata)
+  )
+
+  phy_sub_rarefied <- rarefy_even_depth(
+    phy_sub,
+    rngseed = rarefaction_seed,
+    replace = FALSE,
+    verbose = FALSE
+  )
+
+  list(
+    counts = sub_counts,
+    metadata = sub_metadata,
+    physeq = phy_sub_rarefied,
+    ord = compute_ordinations(phy_sub_rarefied)
+  )
+}
+
+rep1 <- make_replicate_subset(otu_rarefied, metadata, "_1")
+rep2 <- make_replicate_subset(otu_rarefied, metadata, "_2")
+rep3 <- make_replicate_subset(otu_rarefied, metadata, "_3")
+
+# -----------------------------
+# Export replicate count tables
+# -----------------------------
+write.table(rep1$counts, file = "sub1_rarefied.csv", col.names = TRUE, sep = ",", dec = ".")
+write.table(rep2$counts, file = "sub2_rarefied.csv", col.names = TRUE, sep = ",", dec = ".")
+write.table(rep3$counts, file = "sub3_rarefied.csv", col.names = TRUE, sep = ",", dec = ".")
+
+# -----------------------------
+# Export replicate ordination coordinates
+# -----------------------------
+# MDS outputs used downstream as GWAS traits
+write.table(rep1$ord$mds_df, file = "rep1Nova_MDS.csv", row.names = TRUE, col.names = TRUE, sep = ",", dec = ".")
+write.table(rep2$ord$mds_df, file = "sub2Nova_MDS.csv", row.names = TRUE, col.names = TRUE, sep = ",", dec = ".")
+write.table(rep3$ord$mds_df, file = "rep3Nova_MDS.csv", row.names = TRUE, col.names = TRUE, sep = ",", dec = ".")
+
+# NMDS outputs retained for exploratory comparison / optional GWAS traits
+write.table(rep1$ord$nmds_df, file = "sub1Nova_nMDS.csv", row.names = TRUE, col.names = TRUE, sep = ",", dec = ".")
+write.table(rep2$ord$nmds_df, file = "sub2Nova_nMDS.csv", row.names = TRUE, col.names = TRUE, sep = ",", dec = ".")
+write.table(rep3$ord$nmds_df, file = "sub3Nova_nMDS.csv", row.names = TRUE, col.names = TRUE, sep = ",", dec = ".")
+
+# -----------------------------
+# Optional replicate plots
+# -----------------------------
+plot_mds <- function(mds_df, outfile) {
+  p <- ggplot(mds_df, aes(x = Axis.1, y = Axis.2, colour = Genotype, shape = Bio_rep)) +
+    geom_point() +
+    theme_bw() +
+    theme(legend.position = "none") +
+    ggtitle("MDS of rarefied microbiome profiles")
+
+  ggsave(outfile, p, height = 4, width = 5, device = "png")
+}
+
+plot_nmds <- function(nmds_df, outfile, color_var = "Genotype") {
+  p <- ggplot(nmds_df, aes_string(x = "NMDS1", y = "NMDS2", color = color_var)) +
+    geom_point() +
+    theme_bw() +
+    theme(legend.position = "none")
+
+  ggsave(outfile, p, height = 4, width = 5, device = "png")
+}
+
+plot_mds(rep1$ord$mds_df, "MDSrep1Nova.png")
+plot_mds(rep2$ord$mds_df, "MDSrep2Nova.png")
+plot_mds(rep3$ord$mds_df, "MDSrep3Nova.png")
+
+plot_nmds(rep2$ord$nmds_df, "nMDS_phy_rep2_Nova.png", color_var = "Group")
+plot_nmds(rep3$ord$nmds_df, "nMDS_phy_rep3_Nova.png", color_var = "Group")
