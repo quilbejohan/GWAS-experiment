@@ -10,7 +10,7 @@
 #
 # Main inputs:
 #   - Lj_accessions_SNPs.csv
-#   - LotusSNP_accessions_location.csv
+#   - LotusSNP_accessions_location.csv (TOO LARGE TO BE STORED ON GITHUB)
 #   - SNP_category
 #
 # Main output:
